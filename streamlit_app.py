@@ -8,12 +8,11 @@ import io
 # --- 1. RESEARCH DEFINITIONS ---
 METHODOLOGY = {
     "Pillars": "Amplify (PRC alignment), Normalize (Terminology shifts), Resist (Friction/Human Rights).",
-    "Self-Censorship": "Flagged when State media (Gorkhapatra/Rising Nepal) covers BRI/Infrastructure but omits sensitive human rights/refugee keywords.",
-    "CTA & Disputes": "Uses specialized GDELT themes like 'TAX_ETHNICITY_TIBETANS' and 'BORDER_DISPUTE'.",
-    "NLP Metrics": "Tone (Positive-Negative balance) and Anxiety (Friction/Threat levels)."
+    "Source Explorer": "A searchable database of all articles matching your keyword criteria.",
+    "Self-Censorship": "Flagged when state media covers BRI but omits sensitive rights keywords."
 }
 
-# --- 2. DATABASE PERSISTENCE ---
+# --- 2. DATABASE LOGIC ---
 def init_db():
     conn = sqlite3.connect("nepal_influence.db", check_same_thread=False)
     cursor = conn.cursor()
@@ -27,54 +26,36 @@ def init_db():
     conn.commit()
     return conn
 
-def process_and_analyze(conn, uploaded_files):
+def process_bulk(conn, files):
     cursor = conn.cursor()
     added = 0
-    # Mapping for various GDELT and manually curated formats
     col_map = {'GKGRECORDID': 'gkgid', 'Publisher': 'publisher', 'SourceCommonName': 'publisher',
                'URL': 'url', 'DocumentIdentifier': 'url', 'Themes': 'themes', 'V2Themes': 'themes', 'GCAM': 'gcam'}
-
+    
     state_media = ['gorkhapatra', 'risingnepal', 'nepal news agency', 'rss']
     sensitive_kws = ['rights', 'human rights', 'refugee', 'dalai', 'cta', 'dispute', 'arrest', 'border']
 
-    for file in uploaded_files:
+    for file in files:
         df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
         df = df.rename(columns=col_map)
-        
         for _, row in df.iterrows():
             gkgid = str(row.get('gkgid', ''))
-            if not gkgid: continue
-            
+            if not gkgid or gkgid == 'nan': continue
             cursor.execute("SELECT 1 FROM research_vault WHERE gkgid=?", (gkgid,))
             if not cursor.fetchone():
-                url = str(row.get('url', '')).lower()
-                themes = str(row.get('themes', '')).lower()
-                pub = str(row.get('publisher', '')).lower()
+                u, t = str(row.get('url', '')).lower(), str(row.get('themes', '')).lower()
+                rel = 1 if any(k in (u+t) for k in ['tibet', 'xizang', 'buddhism', 'lama']) else 0
+                amp = 1 if rel and any(k in (u+t) for k in ['development', 'harmony', 'infrastructure', 'bri']) else 0
+                res = 1 if rel and any(k in (u+t) for k in sensitive_kws) else 0
+                sc = 1 if (any(sm in str(row.get('publisher')).lower() for sm in state_media) and 'china' in (u+t) and not any(s in (u+t) for s in sensitive_kws)) else 0
                 
-                # 1. Relevance Check (Baseline Corpus)
-                relevant = 1 if any(k in (url + themes) for k in ['tibet', 'xizang', 'buddhism', 'buddhist', 'lama']) else 0
-                
-                # 2. Research Pillars Analysis
-                amp = 1 if relevant and any(k in (url + themes) for k in ['development', 'harmony', 'infrastructure', 'one-china', 'bri']) else 0
-                norm = 1 if relevant and 'xizang' in (url + themes) else 0
-                res = 1 if relevant and any(k in (url + themes) for k in sensitive_kws) else 0
-                
-                # 3. Self-Censorship Detection Logic
-                # Flagged if state media mentions BRI/China but avoids all sensitive Tibetan/Rights keywords
-                is_state = any(sm in pub for sm in state_media)
-                mentions_china = any(c in (url + themes) for c in ['china', 'bri', 'belt and road'])
-                has_sensitive = any(s in (url + themes) for s in sensitive_kws)
-                self_censor = 1 if (is_state and mentions_china and not has_sensitive) else 0
-
                 try:
                     parts = str(row.get('gcam')).split(',')
-                    t, a = float(parts[0]), float(parts[2])
-                except:
-                    t, a = 0.0, 0.0
+                    tone, anx = float(parts[0]), float(parts[2])
+                except: tone, anx = 0.0, 0.0
 
                 cursor.execute("INSERT INTO research_vault VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                             (gkgid, gkgid[:8], gkgid[:4], row.get('publisher'), row.get('url'), 
-                              row.get('themes'), row.get('gcam'), t, a, amp, norm, res, self_censor, relevant))
+                             (gkgid, gkgid[:8], gkgid[:4], row.get('publisher'), row.get('url'), t, row.get('gcam'), tone, anx, amp, 0, res, sc, rel))
                 added += 1
     conn.commit()
     return added
@@ -83,68 +64,66 @@ def process_and_analyze(conn, uploaded_files):
 st.set_page_config(page_title="Nepal Tibet Media Monitor", layout="wide")
 conn = init_db()
 
-st.title("🇳🇵 Nepal Media Influence & Narrative Monitor")
+st.title("🇳🇵 Nepal Media Influence & Source Explorer")
 
 with st.sidebar:
-    st.header("1. Bulk Data Sync")
-    bulk_files = st.file_uploader("Upload Articles (CSV/Excel)", accept_multiple_files=True)
-    if st.button("Synchronize Research Vault"):
-        if bulk_files:
-            new = process_and_analyze(conn, bulk_files)
-            st.success(f"Added {new} new records to longitudinal database.")
-        else:
-            st.warning("Please upload files first.")
+    st.header("1. Data Sourcing")
+    files = st.file_uploader("Upload Articles (CSV/Excel)", accept_multiple_files=True)
+    if st.button("Sync Database"):
+        if files:
+            new = process_bulk(conn, files)
+            st.success(f"Added {new} new articles.")
     
     st.divider()
-    st.header("2. Manual Exploration")
-    user_search = st.text_input("Deep Search (e.g. 'Human Rights', 'Border')", "")
+    st.header("2. Search & Filter")
+    user_query = st.text_input("Filter by Keyword (e.g. 'Border', 'CTA')", "")
 
-# --- 4. DATA PROCESSING & VISUALIZATION ---
+# --- 4. DATA VIZ ---
 df_all = pd.read_sql("SELECT * FROM research_vault", conn)
-
 if not df_all.empty:
-    # Apply user filter if provided, otherwise show relevant corpus
-    if user_search:
-        df_viz = df_all[df_all['url'].str.contains(user_search, case=False) | df_all['themes'].str.contains(user_search, case=False)].copy()
-    else:
-        df_viz = df_all[df_all['relevant'] == 1].copy()
-
-    # Metric Dashboard
-    st.subheader("High-Fidelity Research Metrics")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Articles", len(df_viz))
-    c2.metric("Amplify", df_viz['amplify'].sum())
-    c3.metric("Resist (Friction)", df_viz['resist'].sum())
+    df_viz = df_all[df_all['url'].str.contains(user_query, case=False) | df_all['themes'].str.contains(user_query, case=False)] if user_query else df_all[df_all['relevant'] == 1]
+    
+    # KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Sources Found", len(df_viz))
+    c2.metric("Amplify Pillar", df_viz['amplify'].sum())
+    c3.metric("Resist Pillar", df_viz['resist'].sum())
     c4.metric("Self-Censorship", df_viz['self_censor'].sum())
-    c5.metric("Avg Tone", round(df_viz['tone'].mean(), 2))
 
-    # Visual 1: Longitudinal Trajectory (The Requirement)
-    st.subheader("Narrative Trajectory (2015-2025)")
-    trend = df_viz.groupby(['year', 'publisher']).size().reset_index(name='Count')
-    st.plotly_chart(px.line(trend, x='year', y='Count', color='publisher', markers=True, title="Reporting Frequency per Publisher"))
+    # Trajectory & Sentiment
+    st.plotly_chart(px.line(df_viz.groupby('year').size().reset_index(name='Count'), x='year', y='Count', markers=True, title="Reporting Frequency over Time"))
+    
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.subheader("Top Publishers for these Keywords")
+        pub_counts = df_viz['publisher'].value_counts().reset_index()
+        st.plotly_chart(px.bar(pub_counts, x='publisher', y='count', color='publisher', title="Active Media Houses"))
+    with col_r:
+        st.subheader("Sentiment Distribution")
+        st.plotly_chart(px.scatter(df_viz, x="tone", y="anxiety", color="publisher", hover_data=['url']))
 
-    # Visual 2: Editorial Framing (Tone vs Anxiety)
-    st.subheader("Editorial Framing Analysis")
-    st.plotly_chart(px.scatter(df_viz, x="tone", y="anxiety", color="publisher", size_max=10, 
-                              hover_data=['url'], title="Sentiment Mapping: PRC Alignment vs. Critical Friction"))
-
-    # Visual 3: Terminology Transformation
-    st.subheader("Terminology Shift: Tibet vs. Xizang")
-    df_viz['Term'] = df_viz['url'].apply(lambda x: 'Xizang' if 'xizang' in str(x).lower() else 'Tibet')
-    term_shift = df_viz.groupby(['year', 'Term']).size().reset_index(name='Count')
-    st.plotly_chart(px.bar(term_shift, x='year', y='Count', color='Term', barmode='group', title="Shift toward PRC-standard Terminology"))
-
-    # --- 5. AI GENERATOR ---
+    # --- 5. SOURCE EXPLORER (The New Requirement) ---
     st.divider()
-    if st.button("✨ Generate Comprehensive Policy Brief"):
+    st.header("🔍 Source Explorer: Matching Articles")
+    st.markdown(f"The following sources reference the keywords: **'{user_query}'**")
+    
+    # Clean the dataframe for display
+    display_df = df_viz[['year', 'publisher', 'url', 'tone', 'anxiety']].copy()
+    display_df = display_df.rename(columns={'year': 'Year', 'publisher': 'Media House', 'url': 'Source URL', 'tone': 'Tone Score'})
+    
+    # Interactive Table
+    st.dataframe(display_df, use_container_width=True, column_config={
+        "Source URL": st.column_config.LinkColumn("Source URL")
+    })
+
+    # AI BRIEF
+    if st.button("✨ Generate AI Policy Brief from these Sources"):
         try:
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
             model = genai.GenerativeModel('gemini-2.5-flash-lite')
-            # Feeding quantitative results to the AI
-            stats = f"Amplify: {df_viz['amplify'].sum()}, Resist: {df_viz['resist'].sum()}, Self-Censor: {df_viz['self_censor'].sum()}"
-            response = model.generate_content(f"Write a policy brief on Nepal-China media framing based on these results: {stats}. Focus on self-censorship and Tibet.")
+            stats = f"Context: {user_query}. Sources: {len(df_viz)}. Tone: {df_viz['tone'].mean()}"
+            response = model.generate_content(f"Analyze the framing of these {len(df_viz)} sources regarding {user_query}: {stats}")
             st.markdown(response.text)
-        except Exception as e:
-            st.error(f"API Error: {e}")
+        except Exception as e: st.error(f"API Error: {e}")
 else:
-    st.info("Database empty. Upload files to generate longitudinal analysis.")
+    st.info("Vault is empty. Upload files to begin.")
