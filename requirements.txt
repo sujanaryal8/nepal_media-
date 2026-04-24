@@ -2,4 +2,5 @@ streamlit
 pandas
 plotly
 google-generativeai
-gdeltdoc
+requests
+openpyxl
