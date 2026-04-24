@@ -4,38 +4,50 @@ import pandas as pd
 import plotly.express as px
 import google.generativeai as genai
 import requests
-from datetime import datetime, timedelta
+import io
+from datetime import datetime
 
-# --- 1. AUTOMATED GDELT FETCH ENGINE ---
-@st.cache_data(ttl=900)  # 900 seconds = 15 minutes
-def fetch_live_gdelt_data(search_query):
-    """Fetches real-time data from GDELT DOC API 2.0 based on keywords."""
-    base_url = "https://api.gdeltproject.org/api/v2/doc/doc"
+# --- 1. NEPAL-ONLY SOURCE FILTERING ---
+# GDELT Source Country code for Nepal is 'NP'
+def is_nepali_source(url, publisher):
+    """Filters for Nepali domains or known Nepali media publishers."""
+    nepali_domains = ['.np', 'onlinekhabar.com', 'ratopati.com', 'setopati.com', 
+                      'kathmandupost.com', 'myrepublica.nagariknetwork.com', 
+                      'thehimalayantimes.com', 'nepalitimes.com', 'ekantipur.com',
+                      'gorkhapatraonline.com', 'risingnepaldaily.com', 'annapurnapost.com']
     
-    # GDELT search syntax for Nepal-specific media
-    # near5 identifies words close to each other for higher accuracy
-    query = f'({search_query}) sourcecountry:nepal'
+    url_lower = str(url).lower()
+    pub_lower = str(publisher).lower()
+    
+    return any(domain in url_lower for domain in nepali_domains) or \
+           any(domain in pub_lower for domain in nepali_domains)
+
+# --- 2. AUTOMATED GDELT FETCH (STRICTLY NEPAL) ---
+@st.cache_data(ttl=900)
+def fetch_live_nepal_data(search_query):
+    base_url = "https://api.gdeltproject.org/api/v2/doc/doc"
+    # 'sourcecountry:NP' ensures only Nepali registered sources are returned
+    query = f'({search_query}) sourcecountry:NP'
     
     params = {
         "query": query,
         "mode": "ArtList",
         "format": "CSV",
-        "maxrecords": 75, # GDELT free tier limit per 15 mins
+        "maxrecords": 100,
         "sort": "DateDesc"
     }
     
     try:
         response = requests.get(base_url, params=params, timeout=20)
         if response.status_code == 200:
-            df = pd.read_csv(io.StringIO(response.text))
-            return df
+            return pd.read_csv(io.StringIO(response.text))
         return pd.DataFrame()
     except:
         return pd.DataFrame()
 
-# --- 2. DATABASE & ANALYSIS ENGINE ---
+# --- 3. DATABASE & PERSISTENCE ---
 def init_db():
-    conn = sqlite3.connect("nepal_influence.db", check_same_thread=False)
+    conn = sqlite3.connect("nepal_influence_final.db", check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS research_vault (
@@ -47,88 +59,99 @@ def init_db():
     conn.commit()
     return conn
 
-def sync_to_vault(conn, df):
+def sync_data(conn, df, source_type="Live"):
     cursor = conn.cursor()
     added = 0
-    # Map GDELT API column names to internal database names
-    col_map = {'URL': 'url', 'SourceCommonName': 'publisher', 'Date': 'date'}
+    # Mapping GDELT API & CSV headers
+    col_map = {'URL': 'url', 'SourceCommonName': 'publisher', 'Date': 'date', 
+               'GKGRECORDID': 'gkgid', 'V2Themes': 'themes', 'GCAM': 'gcam'}
     df = df.rename(columns=col_map)
     
     sensitive = ['rights', 'refugee', 'dalai', 'cta', 'dispute', 'arrest', 'border']
-    
+
     for _, row in df.iterrows():
         url = str(row.get('url', ''))
-        # Generate a unique ID if GKGID is missing from ArtList mode
-        gkgid = str(row.get('date', '')) + str(hash(url))[:8]
+        pub = str(row.get('publisher', ''))
+        
+        # STRICT NEPAL FILTER: Skip if not a Nepali source
+        if not is_nepali_source(url, pub):
+            continue
+            
+        gkgid = str(row.get('gkgid', str(row.get('date', '')) + str(hash(url))[:6]))
         
         cursor.execute("SELECT 1 FROM research_vault WHERE url=?", (url,))
         if not cursor.fetchone():
-            text = url.lower()
+            text = (url + " " + str(row.get('themes', ''))).lower()
             rel = 1 if any(k in text for k in ['tibet', 'xizang', 'buddhism']) else 0
-            amp = 1 if rel and any(k in text for k in ['bri', 'development', 'partnership']) else 0
+            amp = 1 if rel and any(k in text for k in ['bri', 'development', 'harmony']) else 0
             res = 1 if rel and any(k in text for k in sensitive) else 0
             
-            # GDELT ArtList doesn't provide GCAM, so we estimate Tone from metadata or use 0.0
+            try:
+                parts = str(row.get('gcam', '0,0,0')).split(',')
+                tone, anx = float(parts[0]), float(parts[2])
+            except: tone, anx = 0.0, 0.0
+
             cursor.execute("INSERT INTO research_vault VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (gkgid, str(row.get('date'))[:8], str(row.get('date'))[:4], 
-                          row.get('publisher'), url, "Live Feed", "0,0,0", 0.0, 0.0, amp, res, 0, rel))
+                          pub, url, str(row.get('themes')), str(row.get('gcam')), tone, anx, amp, res, 0, rel))
             added += 1
     conn.commit()
     return added
 
-# --- 3. UI LAYOUT ---
-st.set_page_config(page_title="Live Media Monitor", layout="wide")
+# --- 4. DASHBOARD UI ---
+st.set_page_config(page_title="Nepal Media influence Monitor", layout="wide")
 conn = init_db()
 
-st.title("🇳🇵 Real-Time Nepal Media influence Monitor")
-st.caption(f"Last Auto-Sync: {datetime.now().strftime('%H:%M:%S')} (Refreshes every 15 mins)")
+st.title("🇳🇵 Nepal-Only Media Influence Analyzer")
+st.caption(f"Status: Monitoring Nepali Digital Information Space | Last Sync: {datetime.now().strftime('%H:%M:%S')}")
 
 with st.sidebar:
-    st.header("Search Parameters")
-    # This query will be sent to GDELT every 15 minutes
-    live_keywords = st.text_input("Live GDELT Keywords", "Tibet, Xizang, Buddhism")
-    st.info("GDELT is currently monitoring 100+ Nepali sources for these terms.")
+    st.header("1. Live Monitoring")
+    live_keywords = st.text_input("Keywords (NP Sources Only)", "Tibet, Xizang, Buddhism")
+    st.caption("Auto-refreshes every 15 minutes.")
     
-    if st.button("Manual Force Refresh"):
-        st.cache_data.clear()
-        st.rerun()
+    st.header("2. Archival Upload")
+    archives = st.file_uploader("Upload Historical CSV/Excel", accept_multiple_files=True)
+    if st.button("Process Archives"):
+        if archives:
+            for f in archives:
+                df_arch = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
+                count = sync_data(conn, df_arch, "Archive")
+                st.success(f"Processed {f.name}: {count} Nepali articles added.")
 
-# --- 4. THE AUTOMATED LOOP ---
-# This line runs every 15 minutes automatically due to TTL
-live_data = fetch_live_gdelt_data(live_keywords)
+# --- 5. EXECUTION & VISUALIZATION ---
+# A. Fetch Live Data
+live_df = fetch_live_nepal_data(live_keywords)
+if not live_df.empty:
+    sync_data(conn, live_df)
 
-if not live_data.empty:
-    new_count = sync_to_vault(conn, live_data)
-    if new_count > 0:
-        st.toast(f"New Data Found: {new_count} articles added from live feed.")
+# B. Load Visuals
+df_all = pd.read_sql("SELECT * FROM research_vault", conn)
 
-# --- 5. VISUALIZATION OF ACCUMULATED DATA ---
-df_viz = pd.read_sql("SELECT * FROM research_vault", conn)
-
-if not df_viz.empty:
-    # Keyword Frequency Logic
-    kw_list = [k.strip().lower() for k in live_keywords.split(",")]
-    kw_counts = []
-    for k in kw_list:
-        count = df_viz['url'].str.contains(k, case=False).sum()
-        kw_counts.append({"Keyword": k.upper(), "Frequency": count})
+if not df_all.empty:
+    # Keyword Frequency Analysis
+    keywords = [k.strip().lower() for k in live_keywords.split(",") if k.strip()]
+    kw_data = [{"Keyword": kw.upper(), "Frequency": (df_all['url'].str.contains(kw, case=False).sum())} for kw in keywords]
     
-    st.header("📊 Live Keyword Impact")
-    st.plotly_chart(px.bar(pd.DataFrame(kw_counts), x="Keyword", y="Frequency", color="Keyword"))
+    st.header("📊 Nepali Media Keyword Frequency")
+    st.plotly_chart(px.bar(pd.DataFrame(kw_data), x="Keyword", y="Frequency", color="Keyword"))
 
-    # Longitudinal Trajectory
-    st.header("📉 Narrative Trajectory (Live + Archival)")
-    trend = df_viz.groupby(['year', 'publisher']).size().reset_index(name='Articles')
+    # Trajectory
+    st.header("📉 Longitudinal Trajectory (2015-2025)")
+    trend = df_all.groupby(['year', 'publisher']).size().reset_index(name='Articles')
     st.plotly_chart(px.line(trend, x='year', y='Articles', color='publisher', markers=True))
 
     # Source Explorer
-    st.header("🔍 Real-Time Source Archive")
-    st.dataframe(df_viz[['year', 'publisher', 'url']].sort_values('year', ascending=False), use_container_width=True)
+    st.header("🔍 Nepali Source Archive")
+    st.dataframe(df_all[['year', 'publisher', 'url', 'tone']].sort_values('year', ascending=False), 
+                 use_container_width=True, column_config={"url": st.column_config.LinkColumn()})
 
-    # Detailed Analysis Detail
-    if st.button("📝 Analyze Live Trends"):
+    # AI Analysis Detail
+    if st.button("📝 Generate Detailed Analysis"):
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         model = genai.GenerativeModel('gemini-2.5-flash-lite')
-        context = f"Top Publishers: {df_viz['publisher'].head(5).tolist()}. Keywords: {live_keywords}"
-        response = model.generate_content(f"Analyze the live media trajectory for: {context}")
+        top_pubs = df_all['publisher'].value_counts().head(5).to_string()
+        response = model.generate_content(f"Analyze the narrative trajectory of these top Nepali sources: {top_pubs}. Query: {live_keywords}")
         st.markdown(response.text)
+else:
+    st.info("Awaiting Nepali media data. Enter keywords or upload archives.")
