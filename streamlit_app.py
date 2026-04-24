@@ -136,7 +136,7 @@ if not data.empty:
         try:
             # Use secrets for the API Key
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-2.5-flash')
             context = df_rel[['PUBLISHER', 'Tone']].head(10).to_string()
             response = model.generate_content(f"Write a short policy brief on Nepal-China media alignment based on this data: {context}")
             st.markdown(response.text)
