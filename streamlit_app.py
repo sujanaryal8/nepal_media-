@@ -1,190 +1,159 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import google.generativeai as genai
-import requests
 import io
-from datetime import datetime
 
 # --- 1. TNNM SYSTEM CONFIGURATION ---
 ST_COLOR_MAP = {
-    "Propaganda / Manufactured Spin": "#FF9800",
-    "Severe Suppression / Active Censorship": "#F44336",
-    "Routine Statecraft / Bureaucratic Tone": "#9E9E9E",
-    "Baseline Regional Tone": "#4CAF50"
+    "Propaganda / Manufactured Spin": "#FF9800",   # Orange
+    "Severe Suppression / Active Censorship": "#F44336", # Red
+    "Routine Statecraft / Bureaucratic Tone": "#9E9E9E", # Grey
+    "Baseline Regional Tone": "#4CAF50"            # Green
 }
 
-# --- 2. DATABASE & ETL ENGINE ---
-def init_db():
-    conn = sqlite3.connect("tnnm_geopolitical.db", check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS research_vault (
-            gkgid TEXT PRIMARY KEY, date TEXT, year TEXT, publisher TEXT, url TEXT, 
-            keywords TEXT, flag TEXT, c_delta REAL, literal REAL, subtext REAL,
-            s_anger REAL, s_anxiety REAL, s_complexity REAL, s_tentative REAL, s_actref REAL
-        )
-    """)
-    conn.commit()
-    return conn
-
-def sync_to_vault(conn, df):
-    cursor = conn.cursor()
-    added = 0
-    col_map = {
-        'GKGRECORDID': 'gkgid', 'DATE': 'date', 'SourceCommonName': 'publisher', 
-        'DocumentIdentifier': 'url', 'Dashboard_Keywords': 'keywords', 
-        'Editorial_Flag': 'flag', 'Censorship_Delta': 'c_delta',
-        'Literal_Text_Score': 'literal', 'Subtext_Gravity_Score': 'subtext'
-    }
-    df = df.rename(columns=col_map)
-
-    for _, row in df.iterrows():
-        gkgid = str(row.get('gkgid', hash(str(row.get('url')))))
-        cursor.execute("SELECT 1 FROM research_vault WHERE gkgid=?", (gkgid,))
-        if not cursor.fetchone():
-            cursor.execute("""INSERT INTO research_vault VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (gkgid, str(row.get('date')), str(row.get('date'))[:4], row.get('publisher'), 
-                 row.get('url'), row.get('keywords'), row.get('flag', 'Baseline Regional Tone'),
-                 row.get('c_delta', 0.0), row.get('literal', 0.0), row.get('subtext', 0.0),
-                 row.get('S_Anger', 0.0), row.get('S_Anxiety', 0.0), row.get('S_Complexity', 0.0),
-                 row.get('S_Tentative', 0.0), row.get('S_ActRef', 0.0)))
-            added += 1
-    conn.commit()
-    return added
-
-# --- 3. LIVE GDELT AUTOMATION (15 MIN TTL) ---
-@st.cache_data(ttl=900)
-def fetch_live_tnnm_feed(query):
-    base_url = "https://api.gdeltproject.org/api/v2/doc/doc"
-    full_query = f'({query}) sourcecountry:NP'
-    params = {"query": full_query, "mode": "ArtList", "format": "CSV", "maxrecords": 50}
+# --- 2. CORE UTILITIES ---
+def load_tnnm_data(file):
     try:
-        res = requests.get(base_url, params=params, timeout=15)
-        if res.status_code == 200:
-            return pd.read_csv(io.StringIO(res.text))
-        return pd.DataFrame()
-    except:
-        return pd.DataFrame()
+        df = pd.read_csv(file)
+        df['DATE'] = pd.to_datetime(df['DATE'])
+        df['YEAR'] = df['DATE'].dt.year
+        return df
+    except Exception as e:
+        st.error(f"Schema Error: Ensure file matches TNNM v1.0 Schema. {e}")
+        return None
 
-# --- 4. DASHBOARD UI ---
-st.set_page_config(page_title="TNNM Forensic Monitor", layout="wide", page_icon="🇳🇵")
-conn = init_db()
+# --- 3. UI LAYOUT & SIDEBAR ---
+st.set_page_config(page_title="TNNM Geopolitical Monitor", layout="wide")
 
-st.title("🇳🇵 TNNM Geopolitical & Forensic Monitor")
-st.caption(f"Pipeline: ETL & NLP/GCAM Scoring | Sync Status: Live (15m Interval)")
+st.title("🇳🇵 TNNM Geopolitical Corpus Analyzer")
+st.caption("Version 1.0 | ETL & NLP/GCAM Scoring Pipeline")
 
 with st.sidebar:
-    st.header("1. Data Ingestion")
-    files = st.file_uploader("Upload TNNM_Geopolitical_Corpus_Final.csv", accept_multiple_files=True)
-    if st.button("Sync Archives"):
-        if files:
-            for f in files:
-                df_load = pd.read_csv(f) if f.name.endswith('.csv') else pd.read_excel(f)
-                count = sync_to_vault(conn, df_load)
-                st.success(f"Merged {count} records from {f.name}")
-
+    st.header("I. Data Operations")
+    uploaded_file = st.file_uploader("Upload TNNM_Geopolitical_Corpus_Final.csv", type=['csv'])
+    
     st.divider()
-    st.header("2. Live Search")
-    live_q = st.text_input("Active Keywords (comma-separated)", "Tibet, BRI, Xizang")
+    st.header("II. Filters (Level 2 Analyst)")
+    if uploaded_file:
+        df = load_tnnm_data(uploaded_file)
+        if df is not None:
+            selected_keywords = st.multiselect(
+                "Filter by Dashboard Keywords", 
+                options=df['Dashboard_Keywords'].dropna().unique(),
+                default=None
+            )
+            selected_flags = st.multiselect(
+                "Editorial Flag Filter", 
+                options=df['Editorial_Flag'].unique(),
+                default=df['Editorial_Flag'].unique()
+            )
 
-live_df = fetch_live_tnnm_feed(live_q)
-if not live_df.empty:
-    sync_to_vault(conn, live_df)
+# --- 4. DASHBOARD LOGIC ---
+if uploaded_file and df is not None:
+    # Filtering Logic
+    filtered_df = df[df['Editorial_Flag'].isin(selected_flags)]
+    if selected_keywords:
+        filtered_df = filtered_df[filtered_df['Dashboard_Keywords'].isin(selected_keywords)]
 
-# --- 5. VISUALIZATION ENGINE ---
-df_all = pd.read_sql("SELECT * FROM research_vault", conn)
+    # --- TIER 1: EXECUTIVE VIEW ---
+    st.header("📊 Executive Summary")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Corpus Size", len(filtered_df))
+    m2.metric("Suppression Cases", len(filtered_df[filtered_df['Editorial_Flag'] == "Severe Suppression / Active Censorship"]))
+    m3.metric("Avg Censorship Delta", round(filtered_df['Censorship_Delta'].mean(), 2))
+    m4.metric("Avg Literal Score", round(filtered_df['Literal_Text_Score'].mean(), 2))
 
-if not df_all.empty:
-    keywords = [k.strip().lower() for k in live_q.split(",")]
-    df_viz = df_all[df_all.apply(lambda r: any(kw in (str(r['url'])+str(r['keywords'])).lower() for kw in keywords), axis=1)]
+    # Narrative Trajectory
+    st.subheader("Longitudinal Narrative Trajectory (2015-2025)")
+    trend_df = filtered_df.groupby(['YEAR', 'Editorial_Flag']).size().reset_index(name='Count')
+    fig_trend = px.line(trend_df, x='YEAR', y='Count', color='Editorial_Flag', 
+                        color_discrete_map=ST_COLOR_MAP, markers=True)
+    st.plotly_chart(fig_trend, use_container_width=True)
 
-    # Executive Stats
-    st.header("📊 Executive Analysis")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Corpus Size", len(df_viz))
-    c2.metric("Avg Censorship Delta", round(df_viz['c_delta'].mean(), 2))
-    c3.metric("Suppression Intensity", len(df_viz[df_viz['flag'].str.contains('Suppression')]))
-    c4.metric("Propaganda Count", len(df_viz[df_viz['flag'].str.contains('Propaganda')]))
-
-    # Keyword Count
-    st.subheader("Keyword Distribution")
-    kw_counts = [{"Keyword": k.upper(), "Count": df_viz['url'].str.contains(k, case=False).sum()} for k in keywords]
-    st.plotly_chart(px.bar(pd.DataFrame(kw_counts), x="Keyword", y="Count", color="Keyword"))
-
-    # Longitudinal Trajectory
-    st.header("📉 Longitudinal Trajectory")
-    trend = df_viz.groupby(['year', 'flag']).size().reset_index(name='Articles')
-    st.plotly_chart(px.line(trend, x='year', y='Articles', color='flag', markers=True, color_discrete_map=ST_COLOR_MAP))
-
-    # Forensic Scatter
-    st.header("🎭 Forensic Sentiment Mapping")
-    st.plotly_chart(px.scatter(df_viz, x="literal", y="subtext", color="flag", 
-                               hover_data=['publisher'], color_discrete_map=ST_COLOR_MAP))
-
-    # Source Explorer
-    st.header("🔍 Source Archive")
-    st.dataframe(df_viz[['year', 'publisher', 'flag', 'url', 'c_delta']].sort_values('year', ascending=False), use_container_width=True)
-
-    # --- 6. ENHANCED VISION-PROXY AI ANALYST ---
+    # --- TIER 2: ANALYST VIEW ---
     st.divider()
-    st.header("🧬 Detailed Forensic Research Breakdown")
-    if st.button("Generate Chart-Specific Intelligence Report"):
+    st.header("🕵️ Analyst Deep-Dive")
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
+        st.subheader("Censorship Delta by Publisher")
+        pub_delta = filtered_df.groupby('SourceCommonName')['Censorship_Delta'].mean().sort_values().reset_index()
+        fig_delta = px.bar(pub_delta, x='Censorship_Delta', y='SourceCommonName', orientation='h',
+                          color='Censorship_Delta', color_continuous_scale='RdYlGn_r')
+        st.plotly_chart(fig_delta, use_container_width=True)
+
+    with col_b:
+        st.subheader("Text Intensity vs. Subtext Gravity")
+        fig_scatter = px.scatter(filtered_df, x="Literal_Text_Score", y="Subtext_Gravity_Score",
+                                color="Editorial_Flag", color_discrete_map=ST_COLOR_MAP,
+                                hover_data=['SourceCommonName', 'Dashboard_Keywords'])
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+    # --- TIER 3: FORENSIC VIEW ---
+    st.divider()
+    st.header("🧬 Forensic Psycholinguistic Engine")
+    forensic_metrics = ["S_Anger", "S_Anxiety", "S_Complexity", "S_Tentative", "S_ActRef"]
+    avg_metrics = filtered_df[forensic_metrics].mean().reset_index()
+    avg_metrics.columns = ['Metric', 'Score']
+    fig_forensic = px.line_polar(avg_metrics, r='Score', theta='Metric', line_close=True)
+    st.plotly_chart(fig_forensic, use_container_width=True)
+
+    st.subheader("Forensic Source Archive")
+    st.dataframe(filtered_df[['DATE', 'SourceCommonName', 'Editorial_Flag', 'Censorship_Delta', 'DocumentIdentifier']], 
+                 use_container_width=True, 
+                 column_config={"DocumentIdentifier": st.column_config.LinkColumn("Source URL")})
+
+    # --- 5. UPDATED AI INTELLIGENCE ENGINE (Vision-Proxy) ---
+    st.divider()
+    if st.button("📝 Generate Forensic Intelligence Report"):
         try:
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
             model = genai.GenerativeModel('gemini-2.5-flash-lite')
             
-            # A. PRE-ANALYSIS: Calculating the "Chart Visuals" for the AI
+            # PRE-ANALYSIS: Describing the data patterns to the AI
+            # 1. Correlation (Explanation for Tier 2 Scatter)
+            correlation = filtered_df['S_Anxiety'].corr(filtered_df['Censorship_Delta'])
             
-            # 1. Keyword-to-Flag associations (for Keyword Frequency analysis)
-            kw_map = {}
-            for kw in keywords:
-                logic = df_viz['url'].str.contains(kw, case=False) | df_viz['keywords'].str.contains(kw, case=False)
-                subset = df_viz[logic]
-                if not subset.empty:
-                    kw_map[kw] = subset['flag'].value_counts().to_dict()
+            # 2. Momentum (Explanation for Tier 1 Line Chart)
+            recent_years = sorted(filtered_df['YEAR'].unique())[-3:]
+            momentum = filtered_df[filtered_df['YEAR'].isin(recent_years)].groupby(['YEAR', 'Editorial_Flag']).size().unstack(fill_value=0).to_dict()
+            
+            # 3. Top Censor Profile (Explanation for Tier 2 Bar Chart)
+            top_censor = filtered_df.groupby('SourceCommonName')['Censorship_Delta'].mean().sort_values(ascending=False).head(3).to_dict()
+            
+            # 4. Keyword association (The "Why")
+            kw_impact = filtered_df.groupby('Dashboard_Keywords')['Editorial_Flag'].value_counts().unstack(fill_value=0).head(5).to_dict()
 
-            # 2. Publisher Forensic Profiles
-            forensic_profile = df_viz.groupby('publisher')[['s_anxiety', 's_complexity', 's_anger']].mean().to_dict()
-
-            # 3. Trajectory Momentum (Last 3 years)
-            recent_years = sorted(df_viz['year'].unique())[-3:]
-            momentum = df_viz[df_viz['year'].isin(recent_years)].groupby(['year', 'flag']).size().unstack(fill_value=0).to_dict()
-            
-            # 4. Statistical Anomalies
-            correlation = df_viz['s_anxiety'].corr(df_viz['c_delta'])
-            anomalies = len(df_viz[(df_viz['subtext'] > 75) & (df_viz['literal'] < 25)])
-            
             analysis_payload = f"""
-            ACTUAL CHART DATA OBSERVATIONS:
-            - KEYWORD-PILLAR MAPPING: {kw_map}
-            - PUBLISHER FORENSIC PROFILES: {forensic_profile}
+            TNNM SYSTEM OBSERVATIONS:
             - 3-YEAR MOMENTUM: {momentum}
             - ANXIETY-MUTING CORRELATION: {round(correlation, 2)}
-            - GHOST NARRATIVES (High Threat/Low Confidence): {anomalies} detected.
+            - HIGHEST CENSORSHIP DELTA SOURCES: {top_censor}
+            - KEYWORD-TO-FLAG CLUSTERING: {kw_impact}
+            - PSYCHOLINGUISTIC MEAN: {filtered_df[forensic_metrics].mean().to_dict()}
             """
             
             prompt = f"""
-            You are a Senior Geopolitical Intelligence Analyst. Your task is to interpret the specific charts generated in the TNNM Dashboard.
+            Act as a Senior Geopolitical Analyst. DO NOT give a generic summary. 
+            Analyze the following specific statistical relationships from the TNNM Dashboard:
             
             {analysis_payload}
             
-            Provide a forensic report addressing these specific chart-driven questions:
-            1. Based on the 'Keyword-Pillar Mapping', which specific keywords are being 'Gatekept' (showing high suppression flags)? Contrast this with 'Amplified' keywords.
-            2. The 'Anxiety-Muting Correlation' is {round(correlation, 2)}. In the context of Nepali media, does this indicate a 'Chilling Effect' or merely bureaucratic caution?
-            3. Analyze the 'Publisher Forensic Profiles'. Which media houses display the highest 'S_Complexity' (evasiveness) when reporting on sensitive keywords?
-            4. Interpret the {anomalies} 'Ghost Narratives'. Why is the subtextual threat high while the literal text remains muted?
-            5. Forecast the 2026 trajectory based on the momentum of the last 3 years.
+            Based on these chart-driven data points, answer:
+            1. Why is the correlation between S_Anxiety and Censorship_Delta at {round(correlation, 2)}? Is this evidence of a 'Chilling Effect'?
+            2. Interpret the 3-Year Momentum. Is Propaganda volume outpacing Baseline reporting? Provide a trajectory forecast.
+            3. Analyze the 'Highest Censorship Delta' sources. Contrast their S_Complexity scores with the baseline.
+            4. Based on Keyword-to-Flag clustering, which geopolitical themes are being most heavily gatekept?
             """
             
-            with st.spinner("AI Analyst is decoding chart relationships..."):
+            with st.spinner("AI is triangulating chart data and forensic metrics..."):
                 response = model.generate_content(prompt)
-                st.markdown("### 🧬 Forensic Intelligence Analysis")
+                st.markdown("### 🧬 Detailed Forensic Insights")
                 st.markdown(response.text)
-                
         except Exception as e:
             st.error(f"Intelligence Engine Error: {e}")
+
 else:
-    st.info("Awaiting TNNM data sync...")
+    st.info("Awaiting TNNM_Geopolitical_Corpus_Final.csv upload to initialize monitor.")
