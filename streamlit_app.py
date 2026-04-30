@@ -1,155 +1,141 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import google.generativeai as genai
-import requests
 import io
-import os
-from datetime import datetime
 
 # --- 1. TNNM SYSTEM CONFIGURATION ---
 ST_COLOR_MAP = {
-    "Propaganda / Manufactured Spin": "#FF9800",
-    "Severe Suppression / Active Censorship": "#F44336",
-    "Routine Statecraft / Bureaucratic Tone": "#9E9E9E",
-    "Baseline Regional Tone": "#4CAF50"
+    "Propaganda / Manufactured Spin": "#FF9800",   
+    "Severe Suppression / Active Censorship": "#F44336", 
+    "Routine Statecraft / Bureaucratic Tone": "#9E9E9E", 
+    "Baseline Regional Tone": "#4CAF50"            
 }
 
+# --- 2. RESEARCH PILLARS & TWO-GATE LOGIC ---
 PILLARS = {
-    "Geographic": ["Tibet", "Xizang", "TAR", "Roof of the World"],
-    "Diplomatic": ["One-China", "Belt and Road", "BRI", "Gentleman's Agreement", "MLAT", "Extradition"],
-    "Dissent": ["Dalai Lama", "Tibetan refugee", "Free Tibet", "CTA", "separatism"],
-    "Border": ["Shigatse", "Gyirong Port", "Kerung", "securitization", "liveable villages"],
-    "Media": ["Confucius Institute", "mask diplomacy", "soft power", "RSS", "Samachar Samiti"]
+    "Geographic Identity": ["Tibet", "Xizang", "TAR", "Roof of the World"],
+    "Diplomatic & Legal": ["One-China", "Belt and Road", "BRI", "Gentleman's Agreement", "MLAT", "Extradition"],
+    "Dissent & Activism": ["Dalai Lama", "Tibetan refugee", "Free Tibet", "CTA", "separatism"],
+    "Border Infrastructure": ["Shigatse", "Gyirong", "Kerung", "securitization", "liveable villages"],
+    "Media Influence": ["Confucius Institute", "mask diplomacy", "soft power", "RSS", "Samachar Samiti"]
 }
 
-# --- 2. DATABASE & SYNC LOGIC ---
-def init_db():
-    conn = sqlite3.connect("tnnm_live_monitor.db", check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS research_vault (
-            gkgid TEXT PRIMARY KEY, date TEXT, year TEXT, publisher TEXT, url TEXT, 
-            flag TEXT, c_delta REAL, literal REAL, subtext REAL,
-            s_anxiety REAL, s_complexity REAL, s_anger REAL
-        )
-    """)
-    conn.commit()
-    return conn
+# Exclusions for Gate 2 Noise Reduction
+EXCLUSIONS = [
+    "spiritual tourism", "monastery tour", "Everest expedition", "Kailash",
+    "trade deficit", "import tariff", "weather", "snowfall", "landslide",
+    "domestic politics", "parliamentary debate"
+]
 
-def sync_data(conn, df):
-    if df is None or df.empty: return 0
-    cursor = conn.cursor()
-    added = 0
+def apply_semantic_gates(df):
+    """Automates the filtering of irrelevant news based on the Two-Gate logic."""
+    # Gate 1: Check for Pillar Keywords
+    pattern = '|'.join([kw for pillar in PILLARS.values() for kw in pillar])
+    df = df[df['Dashboard_Keywords'].str.contains(pattern, case=False, na=False)]
     
-    # ROBUST MAPPING: Handles GDELT Live, TNNM Archive, and varying case sensitivity
-    col_map = {
-        'DocumentIdentifier': 'url', 'URL': 'url', 'url': 'url',
-        'DATE': 'date', 'Date': 'date', 'date': 'date',
-        'SourceCommonName': 'publisher', 'Publisher': 'publisher', 'publisher': 'publisher',
-        'Editorial_Flag': 'flag', 'flag': 'flag',
-        'Censorship_Delta': 'c_delta', 'c_delta': 'c_delta'
-    }
-    df = df.rename(columns=col_map)
+    # Gate 2: Apply Exclusions (NOT logic)
+    exclude_pattern = '|'.join(EXCLUSIONS)
+    df = df[~df['Dashboard_Keywords'].str.contains(exclude_pattern, case=False, na=False)]
     
-    for _, row in df.iterrows():
-        url = str(row.get('url', 'Unknown URL'))
-        
-        # Date & Year Fix (Prevents the 'None' issue from image_1bc83d.png)
-        date_raw = str(row.get('date', ''))
-        if date_raw == 'None' or date_raw == 'nan' or not date_raw:
-            date_val = datetime.now().strftime('%Y-%m-%d')
-        else:
-            date_val = date_raw
-            
-        year_val = date_val[:4] if len(date_val) >= 4 else datetime.now().strftime('%Y')
-        
-        cursor.execute("SELECT 1 FROM research_vault WHERE url=?", (url,))
-        if not cursor.fetchone():
-            flag = row.get('flag', 'Baseline Regional Tone')
-            c_delta = float(row.get('c_delta', 0.0))
-            
-            # Simple Forensic Heuristic for new live entries
-            if flag == 'Baseline Regional Tone' and any(k.lower() in url.lower() for p in PILLARS.values() for k in p):
-                if "tibet" in url.lower() or "bri" in url.lower():
-                    c_delta = 12.0
-                    flag = "Severe Suppression / Active Censorship"
-            
-            cursor.execute("INSERT INTO research_vault VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (str(datetime.now().timestamp()), date_val, year_val,
-                          row.get('publisher', 'Unknown'), url, flag, c_delta, 
-                          row.get('literal', 50.0), row.get('subtext', 50.0), 10.0, 10.0, 5.0))
-            added += 1
-    conn.commit()
-    return added
+    # Pillar Assignment
+    def assign_pillar(row):
+        for pillar, kws in PILLARS.items():
+            if any(kw.lower() in str(row['Dashboard_Keywords']).lower() for kw in kws):
+                return pillar
+        return "Uncategorized"
+    
+    df['Research_Pillar'] = df.apply(assign_pillar, axis=1)
+    return df
 
-@st.cache_data(ttl=900)
-def fetch_live_tnnm_data():
-    base_url = "https://api.gdeltproject.org/api/v2/doc/doc"
-    core_anchors = '"Tibet" OR "Xizang" OR "BRI" OR "Dalai Lama" OR "Border"'
-    params = {"query": f'({core_anchors}) sourcecountry:NP', "mode": "ArtList", "format": "CSV", "maxrecords": 50, "timespan": "15min"}
+# --- 3. CORE UTILITIES ---
+def load_tnnm_data(file):
     try:
-        response = requests.get(base_url, params=params, timeout=5)
-        if response.status_code == 200:
-            return pd.read_csv(io.StringIO(response.text))
-    except:
-        pass
-    return pd.DataFrame()
+        df = pd.read_csv(file)
+        df['DATE'] = pd.to_datetime(df['DATE'])
+        df['YEAR'] = df['DATE'].dt.year
+        return apply_semantic_gates(df)
+    except Exception as e:
+        st.error(f"Schema Error: {e}")
+        return None
 
-# --- 3. DASHBOARD EXECUTION ---
-st.set_page_config(page_title="TNNM Live Monitor", layout="wide", page_icon="🇳🇵")
-conn = init_db()
+# --- 4. UI LAYOUT & SIDEBAR ---
+st.set_page_config(page_title="TNNM Geopolitical Monitor", layout="wide")
 
-# SIDEBAR: Process Uploads first to ensure they are available for the current run
+st.title("🇳🇵 TNNM Geopolitical Corpus Analyzer")
+st.caption("Phase 2: Automated Semantic Gating & Pillar Analysis")
+
 with st.sidebar:
-    st.header("Archival Data")
-    arch_file = st.file_uploader("Upload Historical TNNM CSV", type=['csv'])
-    if arch_file:
-        temp_df = pd.read_csv(arch_file)
-        sync_data(conn, temp_df)
-        st.success("Archive Merged!")
-        st.rerun()
-
-st.title("🇳🇵 TNNM Live Geopolitical Monitor")
-st.caption(f"Syncing Nepali Media every 15 Minutes | Two-Gate Filtering Active")
-
-# Silent Background Live Sync
-live_batch = fetch_live_tnnm_data()
-new_count = sync_data(conn, live_batch)
-
-# Main Data Load from Vault
-df_all = pd.read_sql("SELECT * FROM research_vault", conn)
-
-if not df_all.empty:
-    # 1. Executive KPIs
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Records", len(df_all))
-    m2.metric("Suppression Flags", len(df_all[df_all['flag'].str.contains('Suppression', na=False)]))
-    m3.metric("Avg Muting Index", round(df_all['c_delta'].mean(), 2))
-    m4.metric("Live Sync (New)", new_count)
-
-    # 2. Longitudinal Trajectory Chart
-    st.header("📉 Longitudinal Trajectory")
-    df_all['year'] = df_all['year'].fillna('Unknown')
-    # Filter out 'None' or 'nan' years for cleaner plotting
-    plot_df = df_all[df_all['year'].str.len() == 4]
-    trend = plot_df.groupby(['year', 'flag']).size().reset_index(name='Count')
-    fig = px.line(trend, x='year', y='Count', color='flag', color_discrete_map=ST_COLOR_MAP, markers=True)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 3. Source Explorer
-    st.header("🔍 Source Explorer")
-    st.dataframe(df_all[['date', 'publisher', 'flag', 'url']].sort_values('date', ascending=False), use_container_width=True)
+    st.header("I. Data Operations")
+    uploaded_file = st.file_uploader("Upload TNNM_Geopolitical_Corpus_Final.csv", type=['csv'])
     
-    # 4. AI Analyst
-    if st.button("📝 Generate Forensic Report"):
+    if uploaded_file:
+        df = load_tnnm_data(uploaded_file)
+        if df is not None:
+            st.divider()
+            st.header("II. Pillar Filtering")
+            selected_pillars = st.multiselect("Research Pillars", options=list(PILLARS.keys()), default=list(PILLARS.keys()))
+            selected_flags = st.multiselect("Editorial Flags", options=df['Editorial_Flag'].unique(), default=df['Editorial_Flag'].unique())
+
+# --- 5. DASHBOARD LOGIC ---
+if uploaded_file and df is not None:
+    filtered_df = df[(df['Editorial_Flag'].isin(selected_flags)) & (df['Research_Pillar'].isin(selected_pillars))]
+
+    # --- TIER 1: EXECUTIVE VIEW ---
+    st.header("📊 Pillar Distribution")
+    p1, p2 = st.columns([1, 2])
+    with p1:
+        pillar_counts = filtered_df['Research_Pillar'].value_counts()
+        st.plotly_chart(px.pie(names=pillar_counts.index, values=pillar_counts.values, hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel), use_container_width=True)
+    with p2:
+        st.metric("Clean Corpus Size", len(filtered_df), help="Post-Gate 2 Noise Reduction")
+        trend_df = filtered_df.groupby(['YEAR', 'Research_Pillar']).size().reset_index(name='Count')
+        st.plotly_chart(px.area(trend_df, x='YEAR', y='Count', color='Research_Pillar', title="Pillar Momentum"), use_container_width=True)
+
+    # --- TIER 2: FORENSIC DEEP-DIVE ---
+    st.divider()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("Censorship Delta by Research Pillar")
+        fig_delta = px.box(filtered_df, x='Research_Pillar', y='Censorship_Delta', color='Research_Pillar', title="Editorial Pressure by Topic")
+        st.plotly_chart(fig_delta, use_container_width=True)
+    with col_b:
+        st.subheader("Pillar-Specific Tone vs. Anxiety")
+        st.plotly_chart(px.scatter(filtered_df, x="Literal_Text_Score", y="Subtext_Gravity_Score", color="Research_Pillar", hover_data=['SourceCommonName']), use_container_width=True)
+
+    # --- TIER 3: FORENSIC ENGINE ---
+    st.divider()
+    st.header("🧬 Forensic Psycholinguistic Engine")
+    forensic_metrics = ["S_Anger", "S_Anxiety", "S_Complexity", "S_Tentative", "S_ActRef"]
+    avg_metrics = filtered_df.groupby('Research_Pillar')[forensic_metrics].mean().reset_index().melt(id_vars='Research_Pillar')
+    st.plotly_chart(px.line_polar(avg_metrics, r='value', theta='variable', color='Research_Pillar', line_close=True), use_container_width=True)
+
+    # --- 6. VISION-PROXY AI INTELLIGENCE ---
+    if st.button("📝 Generate Pillar-Aware Forensic Report"):
         try:
             genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
             model = genai.GenerativeModel('gemini-2.5-flash-lite')
-            stats = df_all['flag'].value_counts().to_dict()
-            response = model.generate_content(f"Analyze the following Nepali media distribution: {stats}. Focus on active censorship trends.")
-            st.markdown(response.text)
-        except Exception as e: st.error(f"API Error: {e}")
+            
+            analysis_payload = {
+                "Pillar_Volumes": filtered_df['Research_Pillar'].value_counts().to_dict(),
+                "Censorship_Per_Pillar": filtered_df.groupby('Research_Pillar')['Censorship_Delta'].mean().to_dict(),
+                "Forensic_Averages": filtered_df[forensic_metrics].mean().to_dict()
+            }
+            
+            prompt = f"""
+            Analyze this Pillar-filtered TNNM dataset: {analysis_payload}
+            
+            Address the following:
+            1. Which Research Pillar shows the highest 'Suppression' momentum?
+            2. Analyze the 'Media Influence' pillar regarding RSS and Confucius Institute narratives.
+            3. Interpret the terminology shift in 'Geographic Identity' (Tibet vs Xizang).
+            4. Based on 'Border Infrastructure' scores, is the narrative regarding Gyirong/Kerung securitized or normalized?
+            """
+            
+            with st.spinner("Triangulating Pillar Data..."):
+                st.markdown(f"### 🧬 Pillar-Specific Forensic Insights\n{model.generate_content(prompt).text}")
+        except Exception as e:
+            st.error(f"AI Error: {e}")
 else:
-    st.warning("Vault is empty. Please upload 'TNNM_Geopolitical_Corpus_Final.csv' in the sidebar to populate the monitor.")
+    st.info("Upload TNNM Corpus to initiate automated gating and pillar classification.")
