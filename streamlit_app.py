@@ -42,28 +42,43 @@ def sync_data(conn, df):
     if df is None or df.empty: return 0
     cursor = conn.cursor()
     added = 0
-    # Mapping for both TNNM Archive and GDELT Live
+    
+    # ROBUST MAPPING: Handles GDELT Live, TNNM Archive, and varying case sensitivity
     col_map = {
-        'URL': 'url', 'SourceCommonName': 'publisher', 'Date': 'date',
-        'DocumentIdentifier': 'url', 'DATE': 'date', 'Editorial_Flag': 'flag',
-        'Censorship_Delta': 'c_delta', 'Literal_Text_Score': 'literal',
-        'Subtext_Gravity_Score': 'subtext'
+        'DocumentIdentifier': 'url', 'URL': 'url', 'url': 'url',
+        'DATE': 'date', 'Date': 'date', 'date': 'date',
+        'SourceCommonName': 'publisher', 'Publisher': 'publisher', 'publisher': 'publisher',
+        'Editorial_Flag': 'flag', 'flag': 'flag',
+        'Censorship_Delta': 'c_delta', 'c_delta': 'c_delta'
     }
     df = df.rename(columns=col_map)
+    
     for _, row in df.iterrows():
-        url = str(row.get('url'))
+        url = str(row.get('url', 'Unknown URL'))
+        
+        # Date & Year Fix (Prevents the 'None' issue from image_1bc83d.png)
+        date_raw = str(row.get('date', ''))
+        if date_raw == 'None' or date_raw == 'nan' or not date_raw:
+            date_val = datetime.now().strftime('%Y-%m-%d')
+        else:
+            date_val = date_raw
+            
+        year_val = date_val[:4] if len(date_val) >= 4 else datetime.now().strftime('%Y')
+        
         cursor.execute("SELECT 1 FROM research_vault WHERE url=?", (url,))
         if not cursor.fetchone():
-            # Heuristic for live sync if forensic metrics are missing
             flag = row.get('flag', 'Baseline Regional Tone')
-            c_delta = row.get('c_delta', 0.0)
+            c_delta = float(row.get('c_delta', 0.0))
+            
+            # Simple Forensic Heuristic for new live entries
             if flag == 'Baseline Regional Tone' and any(k.lower() in url.lower() for p in PILLARS.values() for k in p):
-                c_delta = 12.0
-                flag = "Severe Suppression / Active Censorship"
+                if "tibet" in url.lower() or "bri" in url.lower():
+                    c_delta = 12.0
+                    flag = "Severe Suppression / Active Censorship"
             
             cursor.execute("INSERT INTO research_vault VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                         (str(datetime.now().timestamp()), str(row.get('date')), str(row.get('date'))[:4],
-                          row.get('publisher'), url, flag, c_delta, 
+                         (str(datetime.now().timestamp()), date_val, year_val,
+                          row.get('publisher', 'Unknown'), url, flag, c_delta, 
                           row.get('literal', 50.0), row.get('subtext', 50.0), 10.0, 10.0, 5.0))
             added += 1
     conn.commit()
@@ -86,7 +101,7 @@ def fetch_live_tnnm_data():
 st.set_page_config(page_title="TNNM Live Monitor", layout="wide", page_icon="🇳🇵")
 conn = init_db()
 
-# SIDEBAR: Process Uploads First
+# SIDEBAR: Process Uploads first to ensure they are available for the current run
 with st.sidebar:
     st.header("Archival Data")
     arch_file = st.file_uploader("Upload Historical TNNM CSV", type=['csv'])
@@ -94,16 +109,16 @@ with st.sidebar:
         temp_df = pd.read_csv(arch_file)
         sync_data(conn, temp_df)
         st.success("Archive Merged!")
-        st.rerun() # Refresh to populate main dashboard immediately
+        st.rerun()
 
 st.title("🇳🇵 TNNM Live Geopolitical Monitor")
 st.caption(f"Syncing Nepali Media every 15 Minutes | Two-Gate Filtering Active")
 
-# Background Live Sync
+# Silent Background Live Sync
 live_batch = fetch_live_tnnm_data()
 new_count = sync_data(conn, live_batch)
 
-# Main Data Load from Database
+# Main Data Load from Vault
 df_all = pd.read_sql("SELECT * FROM research_vault", conn)
 
 if not df_all.empty:
@@ -114,10 +129,12 @@ if not df_all.empty:
     m3.metric("Avg Muting Index", round(df_all['c_delta'].mean(), 2))
     m4.metric("Live Sync (New)", new_count)
 
-    # 2. Narrative Trajectory Chart
+    # 2. Longitudinal Trajectory Chart
     st.header("📉 Longitudinal Trajectory")
     df_all['year'] = df_all['year'].fillna('Unknown')
-    trend = df_all.groupby(['year', 'flag']).size().reset_index(name='Count')
+    # Filter out 'None' or 'nan' years for cleaner plotting
+    plot_df = df_all[df_all['year'].str.len() == 4]
+    trend = plot_df.groupby(['year', 'flag']).size().reset_index(name='Count')
     fig = px.line(trend, x='year', y='Count', color='flag', color_discrete_map=ST_COLOR_MAP, markers=True)
     st.plotly_chart(fig, use_container_width=True)
 
