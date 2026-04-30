@@ -132,35 +132,65 @@ if not df_all.empty:
     st.header("🔍 Source Archive")
     st.dataframe(df_viz[['year', 'publisher', 'flag', 'url', 'c_delta']].sort_values('year', ascending=False), use_container_width=True)
 
-    # --- 6. VISION-PROXY AI ANALYST (Fixed Repetitive Analysis) ---
-    st.divider()
-    st.header("🧬 Detailed Forensic Research Breakdown")
-    if st.button("Generate Chart-Specific Intelligence Report"):
-        try:
-            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            model = genai.GenerativeModel('gemini-2.5-flash-lite')
+   # --- 5. UPDATED AI INTELLIGENCE ENGINE (Enhanced Vision-Proxy) ---
+st.divider()
+if st.button("📝 Generate Forensic Intelligence Report"):
+    try:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        # Utilizing Lite for higher RPM to handle complex reasoning
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
+        
+        # A. PRE-ANALYSIS: Calculating the "Chart Visuals" for the AI
+        
+        # 1. Keyword-to-Flag Heatmap (Explains the "Keyword Frequency" chart)
+        # Identifies which keywords are most associated with Suppression vs Propaganda
+        kw_analysis = {}
+        for kw in keywords:
+            logic = filtered_df['url'].str.contains(kw, case=False) | filtered_df['themes'].str.contains(kw, case=False)
+            kw_subset = filtered_df[logic]
+            if not kw_subset.empty:
+                kw_analysis[kw] = kw_subset['flag'].value_counts().to_dict()
+
+        # 2. Forensic Complexity Profile (Explains the "Forensic Engine" radar/scatter)
+        # Groups publishers by their psycholinguistic "vibe"
+        forensic_profile = filtered_df.groupby('publisher')[['s_anxiety', 's_complexity', 's_anger']].mean().to_dict()
+
+        # 3. Trajectory Momentum
+        recent_years = sorted(filtered_df['year'].unique())[-3:]
+        recent_trends = filtered_df[filtered_df['year'].isin(recent_years)].groupby(['year', 'flag']).size().unstack(fill_value=0)
+        
+        # 4. Statistical Anomalies
+        correlation = filtered_df['s_anxiety'].corr(filtered_df['c_delta'])
+        anomalies = filtered_df[(filtered_df['subtext'] > 75) & (filtered_df['literal'] < 25)]
+
+        # B. CONSTRUCTING THE CONTEXT-AWARE PROMPT
+        analysis_payload = f"""
+        ACTUAL CHART DATA OBSERVATIONS:
+        - KEYWORD-PILLAR MAPPING: {kw_analysis}
+        - PUBLISHER LINGUISTIC PROFILES: {forensic_profile}
+        - 3-YEAR MOMENTUM: {recent_trends.to_dict()}
+        - ANXIETY-MUTING CORRELATION: {round(correlation, 2)}
+        - GHOST NARRATIVES (High Threat/Low Confidence): {len(anomalies)} detected.
+        """
+        
+        prompt = f"""
+        You are a Senior Geopolitical Intelligence Analyst. Your task is to interpret the specific charts generated in the TNNM Dashboard.
+        
+        {analysis_payload}
+        
+        Provide a forensic report addressing these specific chart-driven questions:
+        1. Based on the 'Keyword-Pillar Mapping', which specific keywords are being 'Gatekept' (showing high suppression flags)? Contrast this with 'Amplified' keywords.
+        2. The 'Anxiety-Muting Correlation' is {round(correlation, 2)}. In the context of Nepali media, does this indicate a 'Chilling Effect' or merely bureaucratic caution?
+        3. Analyze the 'Publisher Linguistic Profiles'. Which media houses display the highest 'S_Complexity' (evasiveness) when reporting on sensitive keywords?
+        4. Interpret the {len(anomalies)} 'Ghost Narratives'. Why is the subtextual threat high while the literal text remains muted?
+        5. Forecast the 2026 trajectory based on the momentum of the last 3 years.
+        """
+        
+        with st.spinner("AI is decoding chart relationships and forensic anomalies..."):
+            response = model.generate_content(prompt)
+            st.markdown("### 🧬 Forensic Intelligence Analysis")
+            # Clear markdown styling for a professional report feel
+            st.markdown(response.text)
             
-            # Extract data-driven observations for the AI
-            corr = df_viz['s_anxiety'].corr(df_viz['c_delta'])
-            top_censor = df_viz[df_viz['flag'].str.contains('Suppression')]['publisher'].value_counts().head(2).to_dict()
-            recent_trend = df_viz.groupby('year')['flag'].value_counts().unstack().tail(3).to_dict()
-            
-            prompt = f"""
-            Analyze these specific chart findings for a Geopolitical Report:
-            1. TRAJECTORY TRENDS: {recent_trend}
-            2. PSYCHOLINGUISTIC CORRELATION (Anxiety/Censorship): {round(corr, 2)}
-            3. TARGET PUBLISHERS: {top_censor}
-            4. KEYWORD VOLUME: {kw_counts}
-            
-            Based ONLY on these numbers:
-            - Explain the significance of the {round(corr, 2)} correlation in terms of Nepali self-censorship.
-            - Interpret why specific keywords are triggering more 'Suppression' flags than 'Propaganda'.
-            - Provide a forecast based on the 3-year trajectory data.
-            """
-            
-            with st.spinner("Analyzing current chart data..."):
-                st.markdown(model.generate_content(prompt).text)
-        except Exception as e:
-            st.error(f"API Error: {e}")
-else:
-    st.info("Awaiting TNNM data sync...")
+    except Exception as e:
+        st.error(f"Intelligence Engine Error: {e}")
